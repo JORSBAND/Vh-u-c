@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>S23 Ultra Night Vision (ToF)</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #000;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+            color: #0f0; /* Matrix Green */
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 15px;
+            box-sizing: border-box;
+            pointer-events: none;
+            z-index: 100;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 18px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 0 0 5px #0f0;
+        }
+
+        p {
+            margin: 5px 0 0 0;
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        #status {
+            color: #fff;
+            font-weight: bold;
+        }
+
+        #debug-log {
+            position: absolute;
+            bottom: 70px;
+            left: 10px;
+            font-size: 10px;
+            color: #0f0;
+            pointer-events: none;
+            max-width: 300px;
+            white-space: pre-wrap;
+        }
+
+        /* Стилізація кнопки ARButton від Three.js */
+        button {
+            pointer-events: auto !important;
+            font-family: 'Courier New', Courier, monospace !important;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border: 1px solid #0f0 !important;
+            background: rgba(0, 50, 0, 0.8) !important;
+            color: #0f0 !important;
+            border-radius: 4px !important;
+            padding: 12px 24px !important;
+            opacity: 1 !important;
+        }
+        
+        .scan-line {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 5px;
+            background: rgba(0, 255, 0, 0.3);
+            box-shadow: 0 0 10px #0f0;
+            animation: scan 3s linear infinite;
+            pointer-events: none;
+            z-index: 50;
+        }
+
+        @keyframes scan {
+            0% { top: 0%; opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { top: 100%; opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>ToF Scanner v1.0</h1>
+        <p>Статус: <span id="status">Ініціалізація...</span></p>
+        <p style="font-size: 10px; color: #888;">(На ПК працює симуляція. Відкрий на S23 Ultra для AR)</p>
+    </div>
+    
+    <div class="scan-line"></div>
+    <div id="debug-log"></div>
+
+    <script type="module">
+        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+        import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/ARButton.js';
+
+        let camera, scene, renderer;
+        let points, geometry;
+        const statusSpan = document.getElementById('status');
+        const debugLog = document.getElementById('debug-log');
+        
+        // Параметри сітки точок (Resolution)
+        // Більше точок = чіткіша картинка, але більше навантаження на телефон
+        const POINTS_WIDTH = 160; 
+        const POINTS_HEIGHT = 120;
+        
+        let isARActive = false;
+
+        init();
+        animate();
+
+        function log(msg) {
+            debugLog.innerText = msg;
+        }
+
+        function init() {
+            const container = document.createElement('div');
+            document.body.appendChild(container);
+
+            scene = new THREE.Scene();
+
+            // Камера для звичайного перегляду (симуляції)
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+            camera.position.z = 2;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true; // Вмикаємо підтримку VR/AR
+            container.appendChild(renderer.domElement);
+
+            // --- Створення хмари точок ---
+            const numPoints = POINTS_WIDTH * POINTS_HEIGHT;
+            const positions = new Float32Array(numPoints * 3);
+            
+            // Заповнюємо початковими даними (площина)
+            let k = 0;
+            for (let i = 0; i < POINTS_HEIGHT; i++) {
+                for (let j = 0; j < POINTS_WIDTH; j++) {
+                    positions[k] = (j / POINTS_WIDTH - 0.5) * 2; // x
+                    positions[k + 1] = (i / POINTS_HEIGHT - 0.5) * 2; // y
+                    positions[k + 2] = -1; // z
+                    k += 3;
+                }
+            }
+
+            geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            // Матеріал точок (зелений, як в ПНБ)
+            const material = new THREE.PointsMaterial({
+                color: 0x00ff00,
+                size: 0.015, // Розмір точки
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending
+            });
+
+            points = new THREE.Points(geometry, material);
+            scene.add(points);
+
+            // --- Кнопка AR ---
+            // Це найважливіша частина для S23 Ultra
+            const arButton = ARButton.createButton(renderer, {
+                requiredFeatures: ['depth-sensing', 'dom-overlay'],
+                domOverlay: { root: document.body },
+                depthSensing: {
+                    usagePreference: ['cpu-optimized'], // Потрібно для доступу до даних в JS
+                    dataFormatPreference: ['luminance-alpha']
+                }
+            });
+            
+            arButton.style.bottom = '20px';
+            document.body.appendChild(arButton);
+
+            // Слухачі подій сесії
+            renderer.xr.addEventListener('sessionstart', () => {
+                isARActive = true;
+                statusSpan.innerText = "AR Сесія активна. Сканування...";
+                log("Сесію розпочато. Очікування даних глибини...");
+            });
+
+            renderer.xr.addEventListener('sessionend', () => {
+                isARActive = false;
+                statusSpan.innerText = "Сесія завершена.";
+            });
+
+            statusSpan.innerText = "Готовий до запуску";
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render(timestamp, frame) {
+            // Якщо AR активний, намагаємось отримати реальні дані з ToF
+            if (isARActive && frame) {
+                handleARDepth(frame);
+            } 
+            // Якщо ми просто в браузері (або Canvas Preview), запускаємо симуляцію
+            else if (!isARActive) {
+                simulateDepthEffect(timestamp);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- ЛОГІКА ДЛЯ S23 ULTRA (РЕАЛЬНІ ДАНІ) ---
+        function handleARDepth(frame) {
+            const referenceSpace = renderer.xr.getReferenceSpace();
+            const viewerPose = frame.getViewerPose(referenceSpace);
+
+            if (viewerPose) {
+                const depthInfo = frame.getDepthInformation(viewerPose.views[0]);
+                
+                if (depthInfo) {
+                    // Якщо отримали дані глибини, оновлюємо точки
+                    updatePointsFromDepth(depthInfo);
+                } else {
+                    log("Немає даних Depth API. Перевір chrome://flags");
+                }
+            }
+        }
+
+        function updatePointsFromDepth(depthInfo) {
+            const positions = geometry.attributes.position.array;
+            const width = depthInfo.width;
+            const height = depthInfo.height;
+            
+            // Коефіцієнти масштабування між нашою сіткою точок і роздільною здатністю сенсора
+            const scaleX = width / POINTS_WIDTH;
+            const scaleY = height / POINTS_HEIGHT;
+
+            let k = 0;
+            for (let y = 0; y < POINTS_HEIGHT; y++) {
+                for (let x = 0; x < POINTS_WIDTH; x++) {
+                    // Знаходимо відповідний піксель на текстурі глибини
+                    const sensorX = Math.floor(x * scaleX);
+                    const sensorY = Math.floor(y * scaleY);
+                    
+                    // Отримуємо глибину в метрах (0 = ніс телефону, 5+ = далеко)
+                    // Важливо: це найдорожча операція
+                    const depth = depthInfo.getDepthInMeters(sensorX / width, sensorY / height);
+
+                    if (depth > 0 && depth < 8.0) {
+                        // Нормалізуємо координати (-0.5 до 0.5)
+                        const xNorm = (x / POINTS_WIDTH) - 0.5;
+                        const yNorm = (y / POINTS_HEIGHT) - 0.5;
+
+                        // Проекція: Чим далі точка (depth), тим ширше вона розходиться (перспектива)
+                        // Ми інвертуємо Y, бо в WebGL Y вгору, а в екранних координатах вниз
+                        positions[k] = xNorm * depth * 3.0; 
+                        positions[k+1] = -yNorm * depth * 3.0; 
+                        positions[k+2] = -depth; // Глибина
+                    } else {
+                        // Якщо даних немає або занадто далеко - ховаємо точку
+                        positions[k+2] = -50; 
+                    }
+                    k += 3;
+                }
+            }
+            geometry.attributes.position.needsUpdate = true;
+        }
+
+        // --- СИМУЛЯЦІЯ (ДЛЯ ПЕРЕГЛЯДУ НА КОМП'ЮТЕРІ) ---
+        function simulateDepthEffect(time) {
+            const positions = geometry.attributes.position.array;
+            const t = time / 1000;
+            
+            let k = 0;
+            for (let y = 0; y < POINTS_HEIGHT; y++) {
+                for (let x = 0; x < POINTS_WIDTH; x++) {
+                    const xNorm = (x / POINTS_WIDTH) - 0.5;
+                    const yNorm = (y / POINTS_HEIGHT) - 0.5;
+
+                    // Створюємо "хвилю" щоб імітувати сканування поверхні
+                    const dist = Math.sqrt(xNorm*xNorm + yNorm*yNorm);
+                    const wave = Math.sin(dist * 10 - t * 2) * 0.5 + 1.5; // Глибина від 1 до 2 метрів
+
+                    positions[k] = xNorm * wave * 4;
+                    positions[k+1] = yNorm * wave * 4;
+                    positions[k+2] = -wave;
+                    
+                    k += 3;
+                }
+            }
+            geometry.attributes.position.needsUpdate = true;
+            
+            // Повільне обертання камери для ефекту
+            scene.rotation.y = Math.sin(t * 0.2) * 0.1;
+        }
+
+    </script>
+</body>
+</html>
+
